@@ -1,4 +1,10 @@
-import { afterEach, expect, mock, test } from 'bun:test'
+import {
+  afterEach,
+  beforeAll,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import { EventEmitter } from 'node:events'
 import * as path from 'node:path'
 
@@ -24,10 +30,20 @@ let actualRipgrepModule: typeof import('../utils/ripgrep.js') | undefined
 let actualMarkdownConfigLoaderModule:
   | typeof import('../utils/markdownConfigLoader.js')
   | undefined
+let defaultFileSuggestionsModule:
+  | Awaited<ReturnType<typeof loadFileSuggestionsModule>>
+  | undefined
 
 afterEach(() => {
   mock.restore()
 })
+
+beforeAll(
+  async () => {
+    defaultFileSuggestionsModule = await loadFileSuggestionsModule()
+  },
+  { timeout: 15_000 },
+)
 
 function createAbortError(message = 'aborted'): Error {
   const error = new Error(message)
@@ -142,8 +158,12 @@ async function loadFileSuggestionsModule(options: LoadModuleOptions = {}) {
   return module
 }
 
+async function getDefaultFileSuggestionsModule() {
+  return defaultFileSuggestionsModule ?? loadFileSuggestionsModule()
+}
+
 test('normalizeFileSuggestionPath strips leading current-directory prefixes', async () => {
-  const fileSuggestions = await loadFileSuggestionsModule()
+  const fileSuggestions = await getDefaultFileSuggestionsModule()
 
   expect(fileSuggestions.normalizeFileSuggestionPath('./src/index.ts')).toBe(
     'src/index.ts',
@@ -157,7 +177,7 @@ test('normalizeFileSuggestionPath strips leading current-directory prefixes', as
 })
 
 test('shouldExcludeFileSuggestionPath excludes common generated directories', async () => {
-  const fileSuggestions = await loadFileSuggestionsModule()
+  const fileSuggestions = await getDefaultFileSuggestionsModule()
 
   expect(
     fileSuggestions.shouldExcludeFileSuggestionPath(
@@ -178,7 +198,7 @@ test('shouldExcludeFileSuggestionPath excludes common generated directories', as
 })
 
 test('filterCandidatePathsForSuggestions filters generated directories and caps file count', async () => {
-  const fileSuggestions = await loadFileSuggestionsModule()
+  const fileSuggestions = await getDefaultFileSuggestionsModule()
 
   const result = fileSuggestions.filterCandidatePathsForSuggestions(
     [
@@ -196,7 +216,7 @@ test('filterCandidatePathsForSuggestions filters generated directories and caps 
 })
 
 test('filterCandidatePathsForSuggestions keeps parent-relative paths when matcher throws on ..', async () => {
-  const fileSuggestions = await loadFileSuggestionsModule()
+  const fileSuggestions = await getDefaultFileSuggestionsModule()
 
   const result = fileSuggestions.filterCandidatePathsForSuggestions(
     ['../bar.ts'],
@@ -216,7 +236,7 @@ test('filterCandidatePathsForSuggestions keeps parent-relative paths when matche
 })
 
 test('createFileSuggestionIgnoreMatcher scopes ignore patterns to their roots for subdirectory cwd', async () => {
-  const fileSuggestions = await loadFileSuggestionsModule()
+  const fileSuggestions = await getDefaultFileSuggestionsModule()
   const repoRoot = path.resolve('virtual-repo')
   const cwd = path.join(repoRoot, 'packages', 'app')
   const matcher = fileSuggestions.createFileSuggestionIgnoreMatcher(cwd, [
