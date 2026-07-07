@@ -3,12 +3,40 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { fileSuffixForOauthConfig } from '../constants/oauth.js'
 import { isRunningWithBun } from './bundledMode.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import { createCombinedAbortSignal } from './combinedAbortSignal.js'
+import {
+  getClaudeConfigHomeDir,
+  isEnvTruthy,
+  migrateLegacyClaudeConfigHome,
+} from './envUtils.js'
 import { findExecutable } from './findExecutable.js'
 import { getFsImplementation } from './fsOperations.js'
 import { which } from './which.js'
 
 type Platform = 'win32' | 'darwin' | 'linux'
+
+export function resolveGlobalClaudeFile(options: {
+  configDirEnv?: string
+  homeDir?: string
+  oauthSuffix?: string
+  migrationSucceeded?: boolean
+  existsSync: (path: string) => boolean
+}): string {
+  const oauthSuffix = options.oauthSuffix ?? ''
+  const configDir = options.configDirEnv || options.homeDir || homedir()
+  const hasExplicitConfigDir = Boolean(options.configDirEnv)
+  const newFilename = `.openclaude${oauthSuffix}.json`
+  const legacyFilename = `.claude${oauthSuffix}.json`
+
+  if (
+    (hasExplicitConfigDir || options.migrationSucceeded === false) &&
+    !options.existsSync(join(configDir, newFilename)) &&
+    options.existsSync(join(configDir, legacyFilename))
+  ) {
+    return join(configDir, legacyFilename)
+  }
+  return join(configDir, newFilename)
+}
 
 // Config and data paths
 export const getGlobalClaudeFile = memoize((): string => {
@@ -23,28 +51,39 @@ export const getGlobalClaudeFile = memoize((): string => {
 
   const oauthSuffix = fileSuffixForOauthConfig()
   const configDir = process.env.CLAUDE_CONFIG_DIR || homedir()
+  const hasExplicitConfigDir = Boolean(process.env.CLAUDE_CONFIG_DIR)
+  let migrationSucceeded = true
 
-  // Default to .openclaude.json. Fall back to .claude.json only if the new
-  // file doesn't exist yet and the legacy one does (same migration pattern
-  // as resolveClaudeConfigHomeDir for the config directory).
-  const newFilename = `.openclaude${oauthSuffix}.json`
-  const legacyFilename = `.claude${oauthSuffix}.json`
-  if (
-    !getFsImplementation().existsSync(join(configDir, newFilename)) &&
-    getFsImplementation().existsSync(join(configDir, legacyFilename))
-  ) {
-    return join(configDir, legacyFilename)
+  if (!hasExplicitConfigDir) {
+    migrationSucceeded = migrateLegacyClaudeConfigHome({ homeDir: configDir })
   }
-  return join(configDir, newFilename)
+
+  // Default installs hard-cut to .openclaude.json after the migration above.
+  // Explicit CLAUDE_CONFIG_DIR users keep the legacy filename fallback because
+  // that env var is the opt-out for automatic migration.
+  return resolveGlobalClaudeFile({
+    configDirEnv: process.env.CLAUDE_CONFIG_DIR,
+    homeDir: configDir,
+    oauthSuffix,
+    migrationSucceeded,
+    existsSync: path => getFsImplementation().existsSync(path),
+  })
 })
 
 const hasInternetAccess = memoize(async (): Promise<boolean> => {
   try {
     const { default: axiosClient } = await import('axios')
-    await axiosClient.head('http://1.1.1.1', {
-      signal: AbortSignal.timeout(1000),
+    const { signal, cleanup } = createCombinedAbortSignal(undefined, {
+      timeoutMs: 1000,
     })
-    return true
+    try {
+      await axiosClient.head('http://1.1.1.1', {
+        signal,
+      })
+      return true
+    } finally {
+      cleanup()
+    }
   } catch {
     return false
   }
@@ -60,7 +99,7 @@ async function isCommandAvailable(command: string): Promise<boolean> {
 }
 
 const detectPackageManagers = memoize(async (): Promise<string[]> => {
-  const packageManagers = []
+  const packageManagers: string[] = []
 
   if (await isCommandAvailable('npm')) packageManagers.push('npm')
   if (await isCommandAvailable('yarn')) packageManagers.push('yarn')
@@ -70,7 +109,7 @@ const detectPackageManagers = memoize(async (): Promise<string[]> => {
 })
 
 const detectRuntimes = memoize(async (): Promise<string[]> => {
-  const runtimes = []
+  const runtimes: string[] = []
 
   if (await isCommandAvailable('bun')) runtimes.push('bun')
   if (await isCommandAvailable('deno')) runtimes.push('deno')

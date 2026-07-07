@@ -1,5 +1,10 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as fs from 'node:fs'
 
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../test/sharedMutationLock.js'
 import {
   getGeminiProjectIdHint,
   mayHaveGeminiAdcCredentials,
@@ -28,19 +33,27 @@ function restoreEnv(key: string, value: string | undefined): void {
   }
 }
 
+beforeEach(async () => {
+  await acquireSharedMutationLock('utils/geminiAuth.test.ts')
+})
+
 afterEach(() => {
-  restoreEnv('GEMINI_API_KEY', originalEnv.GEMINI_API_KEY)
-  restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
-  restoreEnv('GEMINI_ACCESS_TOKEN', originalEnv.GEMINI_ACCESS_TOKEN)
-  restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
-  restoreEnv(
-    'GOOGLE_APPLICATION_CREDENTIALS',
-    originalEnv.GOOGLE_APPLICATION_CREDENTIALS,
-  )
-  restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
-  restoreEnv('GCLOUD_PROJECT', originalEnv.GCLOUD_PROJECT)
-  restoreEnv('GOOGLE_PROJECT_ID', originalEnv.GOOGLE_PROJECT_ID)
-  restoreEnv('APPDATA', originalEnv.APPDATA)
+  try {
+    restoreEnv('GEMINI_API_KEY', originalEnv.GEMINI_API_KEY)
+    restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
+    restoreEnv('GEMINI_ACCESS_TOKEN', originalEnv.GEMINI_ACCESS_TOKEN)
+    restoreEnv('GEMINI_AUTH_MODE', originalEnv.GEMINI_AUTH_MODE)
+    restoreEnv(
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      originalEnv.GOOGLE_APPLICATION_CREDENTIALS,
+    )
+    restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
+    restoreEnv('GCLOUD_PROJECT', originalEnv.GCLOUD_PROJECT)
+    restoreEnv('GOOGLE_PROJECT_ID', originalEnv.GOOGLE_PROJECT_ID)
+    restoreEnv('APPDATA', originalEnv.APPDATA)
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 describe('resolveGeminiCredential', () => {
@@ -101,14 +114,19 @@ describe('resolveGeminiCredential', () => {
   })
 
   test('returns none when no Gemini auth source is configured', async () => {
-    delete process.env.GEMINI_API_KEY
-    delete process.env.GOOGLE_API_KEY
-    delete process.env.GEMINI_ACCESS_TOKEN
-    delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+    const spy = spyOn(fs, 'existsSync').mockReturnValue(false)
+    try {
+      delete process.env.GEMINI_API_KEY
+      delete process.env.GOOGLE_API_KEY
+      delete process.env.GEMINI_ACCESS_TOKEN
+      delete process.env.GOOGLE_APPLICATION_CREDENTIALS
 
-    await expect(resolveGeminiCredential(process.env)).resolves.toEqual({
-      kind: 'none',
-    })
+      await expect(resolveGeminiCredential(process.env)).resolves.toEqual({
+        kind: 'none',
+      })
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test('access-token mode does not silently fall back to ADC', async () => {
@@ -176,11 +194,21 @@ describe('Gemini auth helpers', () => {
   })
 
   test('only treats existing ADC paths as valid hints', () => {
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = existingFilePath
-    expect(mayHaveGeminiAdcCredentials(process.env)).toBe(true)
+    const spy = spyOn(fs, 'existsSync').mockImplementation(
+      (path: fs.PathLike) => {
+        return path === existingFilePath
+      },
+    )
 
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = `${existingFilePath}.missing`
-    process.env.APPDATA = undefined
-    expect(mayHaveGeminiAdcCredentials(process.env)).toBe(false)
+    try {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = existingFilePath
+      expect(mayHaveGeminiAdcCredentials(process.env)).toBe(true)
+
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = `${existingFilePath}.missing`
+      delete process.env.APPDATA
+      expect(mayHaveGeminiAdcCredentials(process.env)).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

@@ -2,6 +2,7 @@ import { feature } from 'bun:bundle';
 import {
   applyProfileEnvToProcessEnv,
   buildStartupEnvFromProfile,
+  isDefaultStartupProviderEnv,
 } from '../utils/providerProfile.js'
 import {
   getProviderValidationError,
@@ -19,7 +20,6 @@ if (typeof globalThis.File === 'undefined') {
     // Node 18.13+ exposes File in node:buffer but not as a global.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { File: NodeFile } = require('node:buffer')
-    // @ts-expect-error -- polyfilling missing global
     globalThis.File = NodeFile
   } catch {
     // Absolute fallback: stub so `MakeTypeAssertion(File)` doesn't throw.
@@ -47,13 +47,16 @@ process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= 'true'
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 process.env.COREPACK_ENABLE_AUTO_PIN = '0';
 
-// Set max heap size for child processes in CCR environments (containers have 16GB)
+// Set max heap size for child processes. The current CLI process is already
+// running by this point; the package launcher raises its heap before importing
+// dist/cli.mjs. Keeping NODE_OPTIONS here preserves the larger cap for tools or
+// subprocesses spawned after startup without overriding user-provided limits.
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level, custom-rules/safe-env-boolean-check
-if (process.env.CLAUDE_CODE_REMOTE === 'true') {
+if (!process.env.NODE_OPTIONS?.includes('--max-old-space-size')) {
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
-  const existing = process.env.NODE_OPTIONS || '';
+  const existing = process.env.NODE_OPTIONS || ''
   // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
-  process.env.NODE_OPTIONS = existing ? `${existing} --max-old-space-size=8192` : '--max-old-space-size=8192';
+  process.env.NODE_OPTIONS = existing ? `${existing} --max-old-space-size=8192` : '--max-old-space-size=8192'
 }
 
 // Harness-science L0 ablation baseline. Inlined here (not init.ts) because
@@ -88,7 +91,9 @@ async function main(): Promise<void> {
   // validation, and the startup banner all see the intended provider/model.
   if (args.includes('--provider')) {
     const { applyProviderFlagFromArgs } = await import('../utils/providerFlag.js');
-    const result = applyProviderFlagFromArgs(args);
+    const result = applyProviderFlagFromArgs(args, {
+      rememberForSettingsEnv: true,
+    });
     if (result?.error) {
       // biome-ignore lint/suspicious/noConsole:: intentional error output
       console.error(`Error: ${result.error}`);
@@ -113,12 +118,44 @@ async function main(): Promise<void> {
   })
   if (startupEnv !== process.env) {
     const startupProfileError = await getProviderValidationError(startupEnv)
-    if (startupProfileError) {
+    if (startupProfileError && !isDefaultStartupProviderEnv(startupEnv)) {
       console.error(
         `Warning: ignoring saved provider profile. ${startupProfileError}`,
       )
     } else {
       applyProfileEnvToProcessEnv(process.env, startupEnv)
+    }
+  }
+
+  // Pane/window teammates are launched as fresh CLI processes. If the parent
+  // selected a configured agentModels key, apply that route before provider
+  // validation and --model env routing run in this child process.
+  {
+    const { eagerLoadSettingsFromArgs } = await import(
+      '../utils/settings/flagSettings.js'
+    )
+    const settingsLoadResult = eagerLoadSettingsFromArgs(args)
+    if (!settingsLoadResult.ok) {
+      if (settingsLoadResult.cause instanceof Error) {
+        const { logError } = await import('../utils/log.js')
+        logError(settingsLoadResult.cause)
+      }
+      const { default: chalk } = await import('chalk')
+      process.stderr.write(chalk.red(`${settingsLoadResult.message}\n`))
+      process.exit(1)
+    }
+
+    const {
+      applyAgentProviderOverrideToEnv,
+      resolveOutOfProcessTeammateProviderFromCliArgs,
+    } = await import('../services/api/agentRouting.js')
+    const { getInitialSettings } = await import('../utils/settings/settings.js')
+    const providerOverride = resolveOutOfProcessTeammateProviderFromCliArgs(
+      args,
+      getInitialSettings(),
+    )
+    if (providerOverride) {
+      applyAgentProviderOverrideToEnv(providerOverride)
     }
   }
 

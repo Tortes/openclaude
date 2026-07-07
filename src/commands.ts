@@ -4,6 +4,7 @@ import autofixPr from './commands/autofix-pr/index.js'
 import backfillSessions from './commands/backfill-sessions/index.js'
 import btw from './commands/btw/index.js'
 import goodClaude from './commands/good-claude/index.js'
+import goal from './commands/goal/index.js'
 import issue from './commands/issue/index.js'
 import feedback from './commands/feedback/index.js'
 import clear from './commands/clear/index.js'
@@ -43,6 +44,10 @@ import onboarding from './commands/onboarding/index.js'
 import pr_comments from './commands/pr_comments/index.js'
 import releaseNotes from './commands/release-notes/index.js'
 import rename from './commands/rename/index.js'
+import {
+  requestSize,
+  requestSizeNonInteractive,
+} from './commands/request-size/index.js'
 import resume from './commands/resume/index.js'
 import review, { ultrareview } from './commands/review.js'
 import session from './commands/session/index.js'
@@ -62,6 +67,7 @@ import bughunter from './commands/bughunter/index.js'
 import terminalSetup from './commands/terminalSetup/index.js'
 import usage from './commands/usage/index.js'
 import theme from './commands/theme/index.js'
+import logo from './commands/logo/index.js'
 import vim from './commands/vim/index.js'
 import { feature } from 'bun:bundle'
 import { isBuddyEnabled } from './buddy/feature.js'
@@ -88,9 +94,6 @@ const remoteControlServerCommand =
 const voiceCommand = feature('VOICE_MODE')
   ? require('./commands/voice/index.js').default
   : null
-const forceSnip = feature('HISTORY_SNIP')
-  ? require('./commands/force-snip.js').default
-  : null
 const workflowsCmd = feature('WORKFLOW_SCRIPTS')
   ? (
       require('./commands/workflows/index.js') as typeof import('./commands/workflows/index.js')
@@ -116,11 +119,6 @@ const torch = feature('TORCH') ? require('./commands/torch.js').default : null
 const peersCmd = feature('UDS_INBOX')
   ? (
       require('./commands/peers/index.js') as typeof import('./commands/peers/index.js')
-    ).default
-  : null
-const forkCmd = feature('FORK_SUBAGENT')
-  ? (
-      require('./commands/fork/index.js') as typeof import('./commands/fork/index.js')
     ).default
   : null
 const buddy = isBuddyEnabled()
@@ -217,6 +215,7 @@ import { getSettingSourceName } from './utils/settings/constants.js'
 import {
   type Command,
   getCommandName,
+  isCommand,
   isCommandEnabled,
 } from './types/command.js'
 
@@ -243,7 +242,6 @@ export const INTERNAL_ONLY_COMMANDS = [
   goodClaude,
   issue,
   initVerifiers,
-  ...(forceSnip ? [forceSnip] : []),
   mockLimits,
   bridgeKick,
   version,
@@ -315,6 +313,8 @@ const COMMANDS = memoize((): Command[] => [
   releaseNotes,
   reloadPlugins,
   rename,
+  requestSize,
+  requestSizeNonInteractive,
   resume,
   session,
   skills,
@@ -324,7 +324,9 @@ const COMMANDS = memoize((): Command[] => [
   stickers,
   tag,
   theme,
+  logo,
   feedback,
+  goal,
   review,
   ultrareview,
   rewind,
@@ -339,7 +341,6 @@ const COMMANDS = memoize((): Command[] => [
   vim,
   wiki,
   ...(webCmd ? [webCmd] : []),
-  ...(forkCmd ? [forkCmd] : []),
   ...(buddy ? [buddy] : []),
   ...(proactive ? [proactive] : []),
   ...(briefCommand ? [briefCommand] : []),
@@ -364,7 +365,7 @@ const COMMANDS = memoize((): Command[] => [
   ...(process.env.USER_TYPE === 'ant' && !process.env.IS_DEMO
     ? INTERNAL_ONLY_COMMANDS
     : []),
-])
+].filter(isCommand))
 
 export const builtInCommandNames = memoize(
   (): Set<string> =>
@@ -643,6 +644,7 @@ export const REMOTE_SAFE_COMMANDS: Set<Command> = new Set([
   clear, // Clear screen
   help, // Show help
   theme, // Change terminal theme
+  logo, // Change startup logo color scheme
   color, // Change agent color
   vim, // Toggle vim mode
   cost, // Show session cost (local cost tracking)
@@ -650,6 +652,7 @@ export const REMOTE_SAFE_COMMANDS: Set<Command> = new Set([
   copy, // Copy last message
   btw, // Quick note
   feedback, // Send feedback
+  goal, // Manage session goal continuation
   plan, // Plan mode toggle
   keybindings, // Keybinding management
   statusline, // Status line toggle
@@ -677,6 +680,7 @@ export const BRIDGE_SAFE_COMMANDS: Set<Command> = new Set(
     summary, // Summarize conversation
     releaseNotes, // Show changelog
     files, // List tracked files
+    goal, // Manage session goal continuation
   ].filter((c): c is Command => c !== null),
 )
 

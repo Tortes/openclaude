@@ -114,7 +114,9 @@ export type ProjectConfig = {
   hasCompletedProjectOnboarding?: boolean
   projectOnboardingSeenCount: number
   hasClaudeMdExternalIncludesApproved?: boolean
+  hasClaudeMdExternalIncludesApprovedForUser?: boolean
   hasClaudeMdExternalIncludesWarningShown?: boolean
+  hasClaudeMdExternalIncludesWarningShownForUser?: boolean
   // MCP server approval fields - migrated to settings but kept for backward compatibility
   enabledMcpjsonServers?: string[]
   disabledMcpjsonServers?: string[]
@@ -145,7 +147,9 @@ const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   hasTrustDialogAccepted: false,
   projectOnboardingSeenCount: 0,
   hasClaudeMdExternalIncludesApproved: false,
+  hasClaudeMdExternalIncludesApprovedForUser: false,
   hasClaudeMdExternalIncludesWarningShown: false,
+  hasClaudeMdExternalIncludesWarningShownForUser: false,
 }
 
 export type InstallMethod = 'local' | 'native' | 'global' | 'unknown'
@@ -182,10 +186,30 @@ export type DiffTool = 'terminal' | 'auto'
 export type ShowCacheStatsMode = 'off' | 'compact' | 'full'
 export const SHOW_CACHE_STATS_MODES = ['off', 'compact', 'full'] as const satisfies readonly ShowCacheStatsMode[]
 
+export const MAX_MESSAGES_COMPACTION_THRESHOLDS = [
+  'off',
+  '100',
+  '200',
+  '500',
+  '1000',
+] as const
+export type MaxMessagesCompactionThreshold =
+  (typeof MAX_MESSAGES_COMPACTION_THRESHOLDS)[number]
+
+export function normalizeMaxMessagesCompactionThreshold(
+  value: unknown,
+): MaxMessagesCompactionThreshold {
+  return MAX_MESSAGES_COMPACTION_THRESHOLDS.includes(
+    value as MaxMessagesCompactionThreshold,
+  )
+    ? (value as MaxMessagesCompactionThreshold)
+    : 'off'
+}
+
 export type OutputStyle = string
 
 export type Providers = string
-export type OpenAICompatibleApiFormat = 'chat_completions' | 'responses'
+export type OpenAICompatibleApiFormat = 'chat_completions' | 'responses' | 'responses_compat'
 export type OpenAICompatibleAuthScheme = 'bearer' | 'raw'
 
 export type ProviderProfile = {
@@ -292,6 +316,13 @@ export type GlobalConfig = {
 
   tipsHistory: {
     [tipId: string]: number // Key is tipId, value is the numStartups when tip was last shown
+  }
+
+  // Sponsored tip throttling. lastShownAt is numStartups when last sponsored tip
+  // was displayed; used with sponsoredTipsFrequency to enforce a 1-in-N cap.
+  sponsoredTipsHistory?: {
+    lastShownAt: number
+    totalShown: number
   }
 
   // /buddy companion soul — bones regenerated from userId on read. See src/buddy/.
@@ -624,6 +655,18 @@ export type GlobalConfig = {
 
   // Knowledge Graph configuration
   knowledgeGraphEnabled: boolean
+
+  // Startup splash logo color scheme — set via /logo. See
+  // src/components/StartupScreen.palettes.ts for valid values. Stored as a
+  // plain string (validated on read) to avoid pulling a UI module into the
+  // config layer. Falls back to 'sunset' if missing or unrecognized.
+  logoColor?: string
+
+  // Message-count-based compaction threshold. Set via /config.
+  // 'off' = disabled (default). Otherwise, one of '100', '200', '500', '1000'.
+  // When enabled, triggers forced compaction if the message count exceeds the
+  // chosen threshold, regardless of token usage.
+  maxMessagesCompactionThreshold?: MaxMessagesCompactionThreshold
 }
 
 /**
@@ -673,6 +716,7 @@ function createDefaultGlobalConfig(): GlobalConfig {
     providerProfiles: [],
     openaiAdditionalModelOptionsCacheByProfile: {},
     knowledgeGraphEnabled: true,
+    maxMessagesCompactionThreshold: 'off',
   }
   return config
 }
@@ -697,6 +741,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'diffTool',
   'env',
   'tipsHistory',
+  'sponsoredTipsHistory',
   'todoFeatureEnabled',
   'showExpandedTodos',
   'messageIdleNotifThresholdMs',
@@ -722,6 +767,8 @@ export const GLOBAL_CONFIG_KEYS = [
   'remoteControlAtStartup',
   'remoteDialogSeen',
   'knowledgeGraphEnabled',
+  'logoColor',
+  'maxMessagesCompactionThreshold',
 ] as const
 
 export type GlobalConfigKey = (typeof GLOBAL_CONFIG_KEYS)[number]
@@ -820,13 +867,29 @@ export function isPathTrusted(dir: string): boolean {
 }
 
 // We have to put this test code here because Jest doesn't support mocking ES modules :O
-const TEST_GLOBAL_CONFIG_FOR_TESTING: GlobalConfig = {
-  ...DEFAULT_GLOBAL_CONFIG,
-  autoUpdates: false,
-  knowledgeGraphEnabled: true,
+// Use function accessors backed by `var` so cyclic test-only module graphs
+// never trip TDZ while config.ts is still evaluating.
+var testGlobalConfigForTesting: GlobalConfig | undefined
+var testProjectConfigForTesting: ProjectConfig | undefined
+
+function getTestGlobalConfigForTesting(): GlobalConfig {
+  if (!testGlobalConfigForTesting) {
+    testGlobalConfigForTesting = {
+      ...DEFAULT_GLOBAL_CONFIG,
+      autoUpdates: false,
+      knowledgeGraphEnabled: true,
+    }
+  }
+  return testGlobalConfigForTesting
 }
-const TEST_PROJECT_CONFIG_FOR_TESTING: ProjectConfig = {
-  ...DEFAULT_PROJECT_CONFIG,
+
+function getTestProjectConfigForTesting(): ProjectConfig {
+  if (!testProjectConfigForTesting) {
+    testProjectConfigForTesting = {
+      ...DEFAULT_PROJECT_CONFIG,
+    }
+  }
+  return testProjectConfigForTesting
 }
 
 export function isProjectConfigKey(key: string): key is ProjectConfigKey {
@@ -858,12 +921,13 @@ export function saveGlobalConfig(
   updater: (currentConfig: GlobalConfig) => GlobalConfig,
 ): void {
   if (process.env.NODE_ENV === 'test') {
-    const config = updater(TEST_GLOBAL_CONFIG_FOR_TESTING)
+    const current = getTestGlobalConfigForTesting()
+    const config = updater(current)
     // Skip if no changes (same reference returned)
-    if (config === TEST_GLOBAL_CONFIG_FOR_TESTING) {
+    if (config === current) {
       return
     }
-    Object.assign(TEST_GLOBAL_CONFIG_FOR_TESTING, config)
+    Object.assign(current, config)
     return
   }
 
@@ -978,13 +1042,20 @@ registerCleanup(async () => {
  * @internal
  */
 function migrateConfigFields(config: GlobalConfig): GlobalConfig {
+  const normalizedConfig = {
+    ...config,
+    maxMessagesCompactionThreshold: normalizeMaxMessagesCompactionThreshold(
+      config.maxMessagesCompactionThreshold,
+    ),
+  }
+
   // Already migrated
-  if (config.installMethod !== undefined) {
-    return config
+  if (normalizedConfig.installMethod !== undefined) {
+    return normalizedConfig
   }
 
   // autoUpdaterStatus is removed from the type but may exist in old configs
-  const legacy = config as GlobalConfig & {
+  const legacy = normalizedConfig as GlobalConfig & {
     autoUpdaterStatus?:
       | 'migrated'
       | 'installed'
@@ -996,7 +1067,7 @@ function migrateConfigFields(config: GlobalConfig): GlobalConfig {
 
   // Determine install method and auto-update preference from old field
   let installMethod: InstallMethod = 'unknown'
-  let autoUpdates = config.autoUpdates ?? true // Default to enabled unless explicitly disabled
+  let autoUpdates = normalizedConfig.autoUpdates ?? true // Default to enabled unless explicitly disabled
 
   switch (legacy.autoUpdaterStatus) {
     case 'migrated':
@@ -1021,7 +1092,7 @@ function migrateConfigFields(config: GlobalConfig): GlobalConfig {
   }
 
   return {
-    ...config,
+    ...normalizedConfig,
     installMethod,
     autoUpdates,
   }
@@ -1111,7 +1182,7 @@ function writeThroughGlobalConfigCache(config: GlobalConfig): void {
 
 export function getGlobalConfig(): GlobalConfig {
   if (process.env.NODE_ENV === 'test') {
-    return TEST_GLOBAL_CONFIG_FOR_TESTING
+    return getTestGlobalConfigForTesting()
   }
 
   // Fast path: pure memory read. After startup, this always hits — our own
@@ -1669,7 +1740,7 @@ export const getProjectPathForConfig = memoize((): string => {
 
 export function getCurrentProjectConfig(): ProjectConfig {
   if (process.env.NODE_ENV === 'test') {
-    return TEST_PROJECT_CONFIG_FOR_TESTING
+    return getTestProjectConfigForTesting()
   }
 
   const absolutePath = getProjectPathForConfig()
@@ -1694,12 +1765,13 @@ export function saveCurrentProjectConfig(
   updater: (currentConfig: ProjectConfig) => ProjectConfig,
 ): void {
   if (process.env.NODE_ENV === 'test') {
-    const config = updater(TEST_PROJECT_CONFIG_FOR_TESTING)
+    const current = getTestProjectConfigForTesting()
+    const config = updater(current)
     // Skip if no changes (same reference returned)
-    if (config === TEST_PROJECT_CONFIG_FOR_TESTING) {
+    if (config === current) {
       return
     }
-    Object.assign(TEST_PROJECT_CONFIG_FOR_TESTING, config)
+    Object.assign(current, config)
     return
   }
   const absolutePath = getProjectPathForConfig()

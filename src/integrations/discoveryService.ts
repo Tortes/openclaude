@@ -23,6 +23,7 @@ import type {
   OllamaGenerationReadiness,
 } from '../utils/providerDiscovery.js'
 import {
+  fetchOpenAICompatibleModelsRaw,
   listOpenAICompatibleModels,
   probeOllamaModelCatalog,
   probeAtomicChatReadiness,
@@ -101,7 +102,10 @@ function normalizeDiscoveryCacheHeaders(
   headers: Record<string, string> | undefined,
 ): Array<[string, string]> {
   return Object.entries(headers ?? {})
-    .map(([name, value]) => [name.trim().toLowerCase(), value.trim()] as const)
+    .map(([name, value]): [string, string] => [
+      name.trim().toLowerCase(),
+      value.trim(),
+    ])
     .filter(([name, value]) => name && value)
     .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
 }
@@ -236,6 +240,25 @@ async function runDiscovery(
     }
 
     case 'openai-compatible': {
+      if (discovery.mapModel) {
+        const rawModels = await fetchOpenAICompatibleModelsRaw({
+          baseUrl: getRouteBaseUrl(routeId, options),
+          apiKey: getRouteDiscoveryApiKey(routeId, options),
+          headers: getRouteDiscoveryHeaders(routeId, options),
+        })
+        if (rawModels === null) {
+          return null
+        }
+        const entries: ModelCatalogEntry[] = []
+        for (const raw of rawModels) {
+          const entry = discovery.mapModel(raw)
+          if (entry !== null) {
+            entries.push(entry)
+          }
+        }
+        return entries
+      }
+
       const models = await listOpenAICompatibleModels({
         baseUrl: getRouteBaseUrl(routeId, options),
         apiKey: getRouteDiscoveryApiKey(routeId, options),
